@@ -27,6 +27,6 @@ resume:
 shape: [64, 96]
 # Folder to store trained weight files.
 # checkpoint_folder: checkpoints
-checkpoint_folder: /home/jovyan/logs/byola/ToyConveyor/
+checkpoint_folder: /home/jovyan/logs/byola_test/dcase22/
 
 # data_path: /home/jovyan/data/dcase20/dev/ToyConveyor/train

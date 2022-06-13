@@ -20,6 +20,8 @@ Example of training on FSD50K dataset:
     # Run training on dev set for 300 epochs
     python train.py work/16k/fsd50k/FSD50K.dev_audio --epochs=300
 """
+import sys 
+sys.path.append('/home/jovyan/code/boyl-a/')
 
 from byol_a.common import (os, sys, np, Path, random, torch, nn, DataLoader,
      get_logger, load_yaml_config, seed_everything, get_timestamp)
@@ -28,8 +30,9 @@ from byol_a.models import AudioNTT2020
 from byol_a.augmentations import (RandomResizeCrop, MixupBYOLA, RunningNorm, NormalizeBatch)
 from byol_a.dataset import WaveInLMSOutDataset
 import multiprocessing
-import pytorch_lightning as pl
 import fire
+import pytorch_lightning as pl
+from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 
 
 class AugmentationModule:
@@ -70,6 +73,7 @@ class BYOLALearner(pl.LightningModule):
         ma, sa = to_np((paired_inputs.mean(), paired_inputs.std()))
 
         loss = self.forward(paired_inputs[:bs], paired_inputs[bs:])
+        self.logger.
         for k, v in {'mb': mb, 'sb': sb, 'ma': ma, 'sa': sa}.items():
             self.log(k, float(v), prog_bar=True, on_step=False, on_epoch=True)
         return loss
@@ -89,6 +93,7 @@ def main(audio_dir, config_path='config.yaml', d=None, epochs=None, resume=None)
     cfg.resume = resume or cfg.resume
     # Essentials
     logger = get_logger(__name__)
+    tb_logger = TensorBoardLogger(save_dir=cfg.checkpoint_folder, )
     logger.info(cfg)
     seed_everything(cfg.seed)
     # Data preparation
@@ -115,7 +120,7 @@ def main(audio_dir, config_path='config.yaml', d=None, epochs=None, resume=None)
         projection_hidden_size=cfg.proj_dim,
         moving_average_decay=cfg.ema_decay,
     )
-    trainer = pl.Trainer(gpus=1, max_epochs=cfg.epochs, weights_summary=None)
+    trainer = pl.Trainer(gpus=1, max_epochs=cfg.epochs, weights_summary=None, logger=tb_logger)
     trainer.fit(learner, dl)
     if trainer.interrupted:
         logger.info('Terminated.')
