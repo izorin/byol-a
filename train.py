@@ -27,7 +27,7 @@ from byol_a.common import (os, sys, np, Path, random, torch, nn, DataLoader,
      get_logger, load_yaml_config, seed_everything, get_timestamp)
 from byol_a.byol_pytorch import BYOL
 from byol_a.models import AudioNTT2020
-from byol_a.augmentations import (RandomResizeCrop, MixupBYOLA, RunningNorm, NormalizeBatch)
+from byol_a.augmentations import (RandomResizeCrop, MixupBYOLA, MixGaussianNoise, RunningNorm, NormalizeBatch)
 from byol_a.dataset import WaveInLMSOutDataset
 import multiprocessing
 import fire
@@ -42,6 +42,7 @@ class AugmentationModule:
         self.train_transform = nn.Sequential(
             MixupBYOLA(ratio=mixup_ratio, log_mixup_exp=log_mixup_exp),
             RandomResizeCrop(virtual_crop_scale=(1.0, 1.5), freq_scale=(0.6, 1.5), time_scale=(0.6, 1.5)),
+            # MixGaussianNoise(ratio=0.2)
         )
         self.pre_norm = RunningNorm(epoch_samples=epoch_samples)
         print('Augmentatoions:', self.train_transform)
@@ -54,11 +55,12 @@ class AugmentationModule:
 class BYOLALearner(pl.LightningModule):
     """BYOL-A learner. Shows batch statistics for each epochs."""
 
-    def __init__(self, model, lr, shape, **kwargs):
+    def __init__(self, model, lr, shape, cfg, **kwargs):
         super().__init__()
         self.learner = BYOL(model, image_size=shape, **kwargs)
         self.lr = lr
         self.post_norm = NormalizeBatch()
+        self.cfg = cfg
 
     def forward(self, images1, images2):
         return self.learner(images1, images2)
@@ -73,41 +75,67 @@ class BYOLALearner(pl.LightningModule):
         ma, sa = to_np((paired_inputs.mean(), paired_inputs.std()))
 
         loss = self.forward(paired_inputs[:bs], paired_inputs[bs:])
-        self.logger.
+        self.log('train_loss', loss.item(), prog_bar=True, on_step=True)
+        # self.logger.experiment.add_scalar('Loss/Train', loss.item(), self.global_step)
+
         for k, v in {'mb': mb, 'sb': sb, 'ma': ma, 'sa': sa}.items():
             self.log(k, float(v), prog_bar=True, on_step=False, on_epoch=True)
+
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+
+        factor = self.cfg.factor
+        patience = self.cfg.patience
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=factor, patience=patience)
+
+        return {
+            "optimizer":optimizer,
+            "lr_scheduler" : {"scheduler" : scheduler,
+                              "monitor" : "train_loss", 
+                            }
+            }
 
     def on_before_zero_grad(self, _):
         self.learner.update_moving_average()
 
+def gather_files(path, machine, folders = ['dev', 'eval_train'], subfolder='train'):
+    files = []
+    
+    for folder in folders:
+        files_path = os.path.join(path, folder, machine, subfolder)
+        files += sorted(Path(files_path).glob('*.wav'))
+        # print(files_path, len(files))
+    return files
 
-def main(audio_dir, config_path='config.yaml', d=None, epochs=None, resume=None) -> None:
+
+def main(machine, device, audio_dir=None, config_path='config.yaml', d=None, epochs=None, resume=None) -> None:
     cfg = load_yaml_config(config_path)
     # Override configs
     cfg.feature_d = d or cfg.feature_d
     cfg.epochs = epochs or cfg.epochs
     cfg.resume = resume or cfg.resume
+    cfg.machine = machine
+    cfg.device = device
     # Essentials
     logger = get_logger(__name__)
-    tb_logger = TensorBoardLogger(save_dir=cfg.checkpoint_folder, )
+    tb_logger = TensorBoardLogger(save_dir=cfg.checkpoint_folder, name=cfg.machine)
     logger.info(cfg)
     seed_everything(cfg.seed)
     # Data preparation
-    files = sorted(Path(audio_dir).glob('*.wav'))
+    # files = sorted(Path(audio_dir).glob('*.wav'))
+    files = gather_files(cfg.data_path, cfg.machine)
     tfms = AugmentationModule((64, 96), 2 * len(files))
     ds = WaveInLMSOutDataset(cfg, files, labels=None, tfms=tfms)
     dl = DataLoader(ds, batch_size=cfg.bs,
                 num_workers=multiprocessing.cpu_count(),
                 pin_memory=True, shuffle=True,)
-    logger.info(f'Dataset: {len(files)} .wav files from {audio_dir}')
+    # logger.info(f'Dataset: {len(files)} .wav files from {audio_dir}')
     # Training preparation
     name = (f'BYOLA-NTT2020d{cfg.feature_d}s{cfg.shape[0]}x{cfg.shape[1]}-{get_timestamp()}'
             f'-e{cfg.epochs}-bs{cfg.bs}-lr{str(cfg.lr)[2:]}'
-            f'-rs{cfg.seed}')
+            f'-rs{cfg.seed}-{machine}')
     logger.info(f'Training {name}...')
     # Model
     model = AudioNTT2020(n_mels=cfg.n_mels, d=cfg.feature_d)
@@ -119,8 +147,9 @@ def main(audio_dir, config_path='config.yaml', d=None, epochs=None, resume=None)
         projection_size=cfg.proj_size,
         projection_hidden_size=cfg.proj_dim,
         moving_average_decay=cfg.ema_decay,
+        cfg=cfg
     )
-    trainer = pl.Trainer(gpus=1, max_epochs=cfg.epochs, weights_summary=None, logger=tb_logger)
+    trainer = pl.Trainer(accelerator='gpu', devices=[device], max_epochs=cfg.epochs, weights_summary=None, logger=tb_logger, log_every_n_steps=1)
     trainer.fit(learner, dl)
     if trainer.interrupted:
         logger.info('Terminated.')

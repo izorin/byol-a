@@ -17,16 +17,21 @@ ema_decay: 0.99
 # Training parameters.
 seed: 42
 bs: 256
-lr: 0.0003
-epochs: 100
+lr: 0.01
+factor: 0.1
+patience: 10
+epochs: 200
 gpus: 1
 num_workers: 8
 # Weight pathname for resuming training.
 resume: 
-# Shape of loh-mel spectrogram [F, T].
+# Shape of log-mel spectrogram [F, T].
 shape: [64, 96]
 # Folder to store trained weight files.
 # checkpoint_folder: checkpoints
 checkpoint_folder: /home/jovyan/logs/byola_test/dcase22/
+data_path: /home/jovyan/data/dcase22/
+# machine: fan
+
 
 # data_path: /home/jovyan/data/dcase20/dev/ToyConveyor/train
